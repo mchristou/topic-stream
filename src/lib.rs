@@ -1,3 +1,3 @@
 mod fastpub;
 
-pub use fastpub::FastPub;
+pub use fastpub::*;
