@@ -3,13 +3,28 @@ use futures::future::select_all;
 use std::{collections::HashSet, hash::Hash, sync::Arc};
 use tokio::sync::broadcast;
 
+/// A topic-based publish-subscribe stream that allows multiple subscribers
+/// to listen to messages associated with specific topics.
+///
+/// # Type Parameters
+/// - `T`: The type representing a topic. Must be hashable, comparable, and clonable.
+/// - `M`: The message type that will be published and received. Must be clonable.
 #[derive(Debug, Clone)]
 pub struct TopicStream<T: Eq + Hash + Clone, M: Clone> {
+    /// Stores the active subscribers for each topic.
     subscribers: Arc<DashMap<T, broadcast::Sender<M>>>,
+    /// The maximum capacity for each topic's message channel.
     capacity: usize,
 }
 
 impl<T: Eq + Hash + Clone, M: Clone> TopicStream<T, M> {
+    /// Creates a new `TopicStream` instance with the specified capacity.
+    ///
+    /// # Arguments
+    /// - `capacity`: The maximum number of messages each topic can hold in its buffer.
+    ///
+    /// # Returns
+    /// A new `TopicStream` instance.
     pub fn new(capacity: usize) -> Self {
         Self {
             subscribers: Arc::new(DashMap::with_capacity(capacity)),
@@ -17,18 +32,40 @@ impl<T: Eq + Hash + Clone, M: Clone> TopicStream<T, M> {
         }
     }
 
+    /// Subscribes to a list of topics and returns a `MultiTopicReceiver`
+    /// that can receive messages from them.
+    ///
+    /// # Arguments
+    /// - `topics`: A slice of topics to subscribe to.
+    ///
+    /// # Returns
+    /// A `MultiTopicReceiver` that listens to the specified topics.
     pub fn subscribe(&self, topics: &[T]) -> MultiTopicReceiver<T, M> {
         let mut receiver = MultiTopicReceiver::new(Arc::new(self.clone()));
         receiver.subscribe(topics);
+
         receiver
     }
 
+    /// Publishes a message to a specific topic. If the topic has no subscribers,
+    /// the message is ignored.
+    ///
+    /// # Arguments
+    /// - `topic`: The topic to publish the message to.
+    /// - `message`: The message to send.
     pub fn publish(&self, topic: &T, message: M) {
         if let Some(sender) = self.subscribers.get(topic) {
             let _ = sender.send(message);
         }
     }
 
+    /// Retrieves the existing sender for a topic or creates a new one if it doesn't exist.
+    ///
+    /// # Arguments
+    /// - `topic`: The topic for which a sender is required.
+    ///
+    /// # Returns
+    /// A `broadcast::Sender<M>` that can be used to send messages to the topic.
     fn get_or_create_sender(&self, topic: &T) -> broadcast::Sender<M> {
         let topic = topic.clone();
         self.subscribers
@@ -38,14 +75,29 @@ impl<T: Eq + Hash + Clone, M: Clone> TopicStream<T, M> {
     }
 }
 
+/// A multi-topic receiver that listens to messages from multiple topics.
+///
+/// # Type Parameters
+/// - `T`: The type representing a topic.
+/// - `M`: The message type being received.
 #[derive(Debug)]
 pub struct MultiTopicReceiver<T: Eq + Hash + Clone, M: Clone> {
+    /// A reference to the associated `TopicStream`.
     topic_stream: Arc<TopicStream<T, M>>,
-    receivers: Vec<broadcast::Receiver<M>>, // Stores the active receivers
-    subscribed_topics: HashSet<T>,          // Tracks subscribed topics
+    /// The list of active message receivers for the subscribed topics.
+    receivers: Vec<broadcast::Receiver<M>>,
+    /// Tracks the topics this receiver is currently subscribed to.
+    subscribed_topics: HashSet<T>,
 }
 
 impl<T: Eq + Hash + Clone, M: Clone> MultiTopicReceiver<T, M> {
+    /// Creates a new `MultiTopicReceiver` for the given `TopicStream`.
+    ///
+    /// # Arguments
+    /// - `topic_stream`: An `Arc` reference to the `TopicStream`.
+    ///
+    /// # Returns
+    /// A new `MultiTopicReceiver` instance.
     pub fn new(topic_stream: Arc<TopicStream<T, M>>) -> Self {
         Self {
             topic_stream,
@@ -54,6 +106,11 @@ impl<T: Eq + Hash + Clone, M: Clone> MultiTopicReceiver<T, M> {
         }
     }
 
+    /// Subscribes to the given list of topics. If already subscribed to a topic,
+    /// it is ignored.
+    ///
+    /// # Arguments
+    /// - `topics`: A slice of topics to subscribe to.
     pub fn subscribe(&mut self, topics: &[T]) {
         for topic in topics {
             if self.subscribed_topics.insert(topic.clone()) {
@@ -63,6 +120,10 @@ impl<T: Eq + Hash + Clone, M: Clone> MultiTopicReceiver<T, M> {
         }
     }
 
+    /// Asynchronously waits for a message from any of the subscribed topics.
+    ///
+    /// # Returns
+    /// An `Option<M>` containing the received message, or `None` if all receivers are closed.
     pub async fn recv(&mut self) -> Option<M> {
         if self.receivers.is_empty() {
             return None;
@@ -76,7 +137,7 @@ impl<T: Eq + Hash + Clone, M: Clone> MultiTopicReceiver<T, M> {
 
         let (result, _index, _remaining) = select_all(futures).await;
 
-        result.ok() // If message received, return it. If all error out, return None.
+        result.ok() // If a message is received, return it; otherwise, return None.
     }
 }
 
