@@ -1,9 +1,9 @@
 use dashmap::DashMap;
 use futures::future::select_all;
-use std::{hash::Hash, sync::Arc};
+use std::{collections::HashSet, hash::Hash, sync::Arc};
 use tokio::sync::broadcast;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FastPub<T: Eq + Hash + Clone, M: Clone> {
     subscribers: Arc<DashMap<T, broadcast::Sender<M>>>,
     capacity: usize,
@@ -12,27 +12,15 @@ pub struct FastPub<T: Eq + Hash + Clone, M: Clone> {
 impl<T: Eq + Hash + Clone, M: Clone> FastPub<T, M> {
     pub fn new(capacity: usize) -> Self {
         Self {
-            subscribers: Arc::new(DashMap::new()),
+            subscribers: Arc::new(DashMap::with_capacity(capacity)),
             capacity,
         }
     }
 
-    pub fn subscribe(&self, topics: &[T]) -> MultiTopicReceiver<M> {
-        let receivers: Vec<_> = topics
-            .iter()
-            .map(|topic| {
-                // Check if the topic exists in the map, and if not, insert a new sender
-                let sender = self
-                    .subscribers
-                    .entry(topic.clone())
-                    .or_insert_with(|| broadcast::channel(self.capacity).0); // Create a new channel if topic doesn't exist
-
-                // Subscribe to the sender and get the receiver for this topic
-                sender.subscribe()
-            })
-            .collect();
-
-        MultiTopicReceiver::new(receivers)
+    pub fn subscribe(&self, topics: &[T]) -> MultiTopicReceiver<T, M> {
+        let mut receiver = MultiTopicReceiver::new(Arc::new(self.clone()));
+        receiver.subscribe(topics);
+        receiver
     }
 
     pub fn publish(&self, topic: &T, message: M) {
@@ -40,32 +28,72 @@ impl<T: Eq + Hash + Clone, M: Clone> FastPub<T, M> {
             let _ = sender.send(message);
         }
     }
+
+    fn get_or_create_sender(&self, topic: &T) -> broadcast::Sender<M> {
+        let topic = topic.clone();
+        self.subscribers
+            .entry(topic)
+            .or_insert_with(|| broadcast::channel(self.capacity).0)
+            .clone()
+    }
 }
 
 #[derive(Debug)]
-pub struct MultiTopicReceiver<M: Clone> {
-    receivers: Vec<broadcast::Receiver<M>>,
+pub struct MultiTopicReceiver<T: Eq + Hash + Clone, M: Clone> {
+    fast_pub: Arc<FastPub<T, M>>,
+    receivers: Vec<broadcast::Receiver<M>>, // Stores the active receivers
+    subscribed_topics: HashSet<T>,          // Tracks subscribed topics
 }
 
-impl<M: Clone> MultiTopicReceiver<M> {
-    pub fn new(receivers: Vec<broadcast::Receiver<M>>) -> Self {
-        Self { receivers }
+impl<T: Eq + Hash + Clone, M: Clone> MultiTopicReceiver<T, M> {
+    pub fn new(fast_pub: Arc<FastPub<T, M>>) -> Self {
+        Self {
+            fast_pub,
+            receivers: Vec::new(),
+            subscribed_topics: HashSet::new(),
+        }
+    }
+
+    pub fn subscribe(&mut self, topics: &[T]) {
+        for topic in topics {
+            if self.subscribed_topics.insert(topic.clone()) {
+                let sender = self.fast_pub.get_or_create_sender(topic);
+                self.receivers.push(sender.subscribe());
+            }
+        }
     }
 
     pub async fn recv(&mut self) -> Option<M> {
-        // Collect all receiver futures into a vector
+        if self.receivers.is_empty() {
+            return None;
+        }
+
         let futures = self
             .receivers
             .iter_mut()
             .map(|receiver| Box::pin(receiver.recv()))
             .collect::<Vec<_>>();
 
-        // Use select_all to select the first resolved future
         let (result, _index, _remaining) = select_all(futures).await;
 
-        match result {
-            Ok(m) => Some(m), // Return the first message received
-            Err(_) => None,   // If all receivers error out, return None
+        result.ok() // If message received, return it. If all error out, return None.
+    }
+}
+
+impl<T: Eq + Hash + Clone, M: Clone> Drop for MultiTopicReceiver<T, M> {
+    fn drop(&mut self) {
+        let mut to_remove = Vec::new();
+
+        for topic in &self.subscribed_topics {
+            if let Some(sender) = self.fast_pub.subscribers.get(topic) {
+                if sender.receiver_count() == 1 {
+                    to_remove.push(topic.clone());
+                }
+            }
+        }
+
+        for topic in to_remove {
+            self.fast_pub.subscribers.remove(&topic);
         }
     }
 }
