@@ -1,3 +1,3 @@
-mod fastpub;
+mod topic_stream;
 
-pub use fastpub::*;
+pub use topic_stream::*;

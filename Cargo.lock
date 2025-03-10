@@ -71,15 +71,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fastpub"
-version = "0.1.0"
-dependencies = [
- "dashmap",
- "futures",
- "tokio",
-]
-
-[[package]]
 name = "futures"
 version = "0.3.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -336,6 +327,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "topic_stream"
+version = "0.1.0"
+dependencies = [
+ "dashmap",
+ "futures",
+ "tokio",
 ]
 
 [[package]]
