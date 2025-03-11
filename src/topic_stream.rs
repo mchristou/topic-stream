@@ -1,7 +1,7 @@
 use dashmap::DashMap;
 use futures::future::select_all;
 use std::{collections::HashSet, hash::Hash, sync::Arc};
-use tokio::sync::broadcast;
+use tokio::sync::broadcast::{self, error::SendError};
 
 /// A topic-based publish-subscribe stream that allows multiple subscribers
 /// to listen to messages associated with specific topics.
@@ -53,10 +53,16 @@ impl<T: Eq + Hash + Clone, M: Clone> TopicStream<T, M> {
     /// # Arguments
     /// - `topic`: The topic to publish the message to.
     /// - `message`: The message to send.
-    pub fn publish(&self, topic: &T, message: M) {
+    ///
+    /// # Returns
+    /// - `Ok(())`: If the message was successfully sent or there were no subscribers.
+    /// - `Err(SendError<M>)`: If there was an error sending the message.
+    pub fn publish(&self, topic: &T, message: M) -> Result<(), SendError<M>> {
         if let Some(sender) = self.subscribers.get(topic) {
-            let _ = sender.send(message);
-        }
+            sender.send(message)?;
+        };
+
+        Ok(())
     }
 
     /// Retrieves the existing sender for a topic or creates a new one if it doesn't exist.
