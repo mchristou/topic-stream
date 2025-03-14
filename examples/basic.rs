@@ -13,7 +13,10 @@ async fn main() {
     // Spawn a publisher
     let publisher = topic_stream.clone();
     task::spawn(async move {
-        publisher.publish(&topic, "Publish message".to_string());
+        publisher
+            .publish(&topic, "Publish message".to_string())
+            .await
+            .unwrap();
     });
 
     // Receive the message

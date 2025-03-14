@@ -9,8 +9,14 @@ async fn main() {
     let topics = vec!["sports".to_string(), "weather".to_string()];
     let mut receiver = topic_stream.subscribe(&topics);
 
-    topic_stream.publish(&"sports".to_string(), "Football match tonight".to_string());
-    topic_stream.publish(&"weather".to_string(), "Rain expected tomorrow".to_string());
+    topic_stream
+        .publish(&"sports".to_string(), "Football match tonight".to_string())
+        .await
+        .unwrap();
+    topic_stream
+        .publish(&"weather".to_string(), "Rain expected tomorrow".to_string())
+        .await
+        .unwrap();
 
     if let Some(message) = receiver.recv().await {
         println!("Received: {}", message);

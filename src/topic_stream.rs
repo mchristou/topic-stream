@@ -1,30 +1,30 @@
+use async_broadcast::{Receiver, SendError, Sender};
 use dashmap::DashMap;
 use futures::future::select_all;
 use std::{collections::HashSet, hash::Hash, sync::Arc};
-use tokio::sync::broadcast::{self, error::SendError};
 
 /// A topic-based publish-subscribe stream that allows multiple subscribers
 /// to listen to messages associated with specific topics.
 ///
 /// # Type Parameters
-/// - `T`: The type representing a topic. Must be hashable, comparable, and clonable.
-/// - `M`: The message type that will be published and received. Must be clonable.
+/// - T: The type representing a topic. Must be hashable, comparable, and clonable.
+/// - M: The message type that will be published and received. Must be clonable.
 #[derive(Debug, Clone)]
 pub struct TopicStream<T: Eq + Hash + Clone, M: Clone> {
     /// Stores the active subscribers for each topic.
-    subscribers: Arc<DashMap<T, broadcast::Sender<M>>>,
+    subscribers: Arc<DashMap<T, Sender<M>>>,
     /// The maximum capacity for each topic's message channel.
     capacity: usize,
 }
 
 impl<T: Eq + Hash + Clone, M: Clone> TopicStream<T, M> {
-    /// Creates a new `TopicStream` instance with the specified capacity.
+    /// Creates a new TopicStream instance with the specified capacity.
     ///
     /// # Arguments
-    /// - `capacity`: The maximum number of messages each topic can hold in its buffer.
+    /// - capacity: The maximum number of messages each topic can hold in its buffer.
     ///
     /// # Returns
-    /// A new `TopicStream` instance.
+    /// A new TopicStream instance.
     pub fn new(capacity: usize) -> Self {
         Self {
             subscribers: Arc::new(DashMap::with_capacity(capacity)),
@@ -32,14 +32,14 @@ impl<T: Eq + Hash + Clone, M: Clone> TopicStream<T, M> {
         }
     }
 
-    /// Subscribes to a list of topics and returns a `MultiTopicReceiver`
+    /// Subscribes to a list of topics and returns a MultiTopicReceiver
     /// that can receive messages from them.
     ///
     /// # Arguments
-    /// - `topics`: A slice of topics to subscribe to.
+    /// - topics: A slice of topics to subscribe to.
     ///
     /// # Returns
-    /// A `MultiTopicReceiver` that listens to the specified topics.
+    /// A MultiTopicReceiver that listens to the specified topics.
     pub fn subscribe(&self, topics: &[T]) -> MultiTopicReceiver<T, M> {
         let mut receiver = MultiTopicReceiver::new(Arc::new(self.clone()));
         receiver.subscribe(topics);
@@ -51,59 +51,60 @@ impl<T: Eq + Hash + Clone, M: Clone> TopicStream<T, M> {
     /// the message is ignored.
     ///
     /// # Arguments
-    /// - `topic`: The topic to publish the message to.
-    /// - `message`: The message to send.
+    /// - topic: The topic to publish the message to.
+    /// - message: The message to send.
     ///
     /// # Returns
-    /// - `Ok(())`: If the message was successfully sent or there were no subscribers.
-    /// - `Err(SendError<M>)`: If there was an error sending the message.
-    pub fn publish(&self, topic: &T, message: M) -> Result<(), SendError<M>> {
+    /// - Ok(()): If the message was successfully sent or there were no subscribers.
+    /// - Err(SendError<M>): If there was an error sending the message.
+    pub async fn publish(&self, topic: &T, message: M) -> Result<(), SendError<M>> {
         if let Some(sender) = self.subscribers.get(topic) {
-            sender.send(message)?;
+            sender.broadcast(message).await?;
         };
 
         Ok(())
     }
 
-    /// Retrieves the existing sender for a topic or creates a new one if it doesn't exist.
+    /// Retrieves the existing receiver for a topic or creates a new one if it doesn't exist.
     ///
     /// # Arguments
-    /// - `topic`: The topic for which a sender is required.
+    /// - `topic`: The topic for which a receiver is required.
     ///
     /// # Returns
-    /// A `broadcast::Sender<M>` that can be used to send messages to the topic.
-    fn get_or_create_sender(&self, topic: &T) -> broadcast::Sender<M> {
+    /// A `Receiver<M>` that can be used to receive messages from the topic.
+    fn get_or_create_receiver(&self, topic: &T) -> Receiver<M> {
         let topic = topic.clone();
+        let (sender, _receiver) = async_broadcast::broadcast(self.capacity);
         self.subscribers
             .entry(topic)
-            .or_insert_with(|| broadcast::channel(self.capacity).0)
-            .clone()
+            .or_insert_with(|| sender)
+            .new_receiver()
     }
 }
 
 /// A multi-topic receiver that listens to messages from multiple topics.
 ///
 /// # Type Parameters
-/// - `T`: The type representing a topic.
-/// - `M`: The message type being received.
+/// - T: The type representing a topic.
+/// - M: The message type being received.
 #[derive(Debug)]
 pub struct MultiTopicReceiver<T: Eq + Hash + Clone, M: Clone> {
-    /// A reference to the associated `TopicStream`.
+    /// A reference to the associated TopicStream.
     topic_stream: Arc<TopicStream<T, M>>,
     /// The list of active message receivers for the subscribed topics.
-    receivers: Vec<broadcast::Receiver<M>>,
+    receivers: Vec<Receiver<M>>,
     /// Tracks the topics this receiver is currently subscribed to.
     subscribed_topics: HashSet<T>,
 }
 
 impl<T: Eq + Hash + Clone, M: Clone> MultiTopicReceiver<T, M> {
-    /// Creates a new `MultiTopicReceiver` for the given `TopicStream`.
+    /// Creates a new MultiTopicReceiver for the given TopicStream.
     ///
     /// # Arguments
-    /// - `topic_stream`: An `Arc` reference to the `TopicStream`.
+    /// - topic_stream: An Arc reference to the TopicStream.
     ///
     /// # Returns
-    /// A new `MultiTopicReceiver` instance.
+    /// A new MultiTopicReceiver instance.
     pub fn new(topic_stream: Arc<TopicStream<T, M>>) -> Self {
         Self {
             topic_stream,
@@ -116,20 +117,17 @@ impl<T: Eq + Hash + Clone, M: Clone> MultiTopicReceiver<T, M> {
     /// it is ignored.
     ///
     /// # Arguments
-    /// - `topics`: A slice of topics to subscribe to.
+    /// - topics: A slice of topics to subscribe to.
     pub fn subscribe(&mut self, topics: &[T]) {
-        for topic in topics {
-            if self.subscribed_topics.insert(topic.clone()) {
-                let sender = self.topic_stream.get_or_create_sender(topic);
-                self.receivers.push(sender.subscribe());
-            }
-        }
+        self.receivers.extend(
+            topics
+                .iter()
+                .filter(|topic| self.subscribed_topics.insert((*topic).clone()))
+                .map(|topic| self.topic_stream.get_or_create_receiver(topic)),
+        );
     }
 
-    /// Asynchronously waits for a message from any of the subscribed topics.
-    ///
-    /// # Returns
-    /// An `Option<M>` containing the received message, or `None` if all receivers are closed.
+    /// An Option<M> containing the received message, or None if all receivers are closed.
     pub async fn recv(&mut self) -> Option<M> {
         if self.receivers.is_empty() {
             return None;
@@ -153,15 +151,15 @@ impl<T: Eq + Hash + Clone, M: Clone> Drop for MultiTopicReceiver<T, M> {
 
         for topic in &self.subscribed_topics {
             if let Some(sender) = self.topic_stream.subscribers.get(topic) {
-                if sender.receiver_count() == 1 {
+                if sender.receiver_count() <= 1 {
                     to_remove.push(topic.clone());
                 }
             }
         }
 
-        for topic in to_remove {
+        to_remove.into_iter().for_each(|topic| {
             self.topic_stream.subscribers.remove(&topic);
-        }
+        });
     }
 }
 
@@ -186,7 +184,7 @@ mod tests {
 
         // Publisher sends a message to the topic
         let message = Message("Hello, Subscriber!".to_string());
-        publisher.publish(&topic, message.clone());
+        publisher.publish(&topic, message.clone()).await.unwrap();
 
         // Subscriber receives the message
         let received_message = receiver.recv().await.unwrap();
@@ -205,7 +203,7 @@ mod tests {
 
         // Publisher sends a message to the topic
         let message = Message("Hello, Subscribers!".to_string());
-        publisher.publish(&topic, message.clone());
+        publisher.publish(&topic, message.clone()).await.unwrap();
 
         // Subscriber 1 receives the message
         let received_message1 = receiver1.recv().await.unwrap();
@@ -226,7 +224,7 @@ mod tests {
 
         // Publisher sends a message to the topic with no subscribers
         let message = Message("Hello, World!".to_string());
-        publisher.publish(&topic, message.clone());
+        publisher.publish(&topic, message.clone()).await.unwrap();
 
         // No subscribers, so nothing to receive
         // Here we assume that nothing crashes or any side effects occur.
@@ -255,8 +253,8 @@ mod tests {
         // Publisher sends multiple messages
         let message1 = Message("Message 1".to_string());
         let message2 = Message("Message 2".to_string());
-        publisher.publish(&topic, message1.clone());
-        publisher.publish(&topic, message2.clone());
+        publisher.publish(&topic, message1.clone()).await.unwrap();
+        publisher.publish(&topic, message2.clone()).await.unwrap();
 
         // Subscriber receives the first message
         let received_message1 = receiver.recv().await.unwrap();
@@ -277,11 +275,11 @@ mod tests {
 
         // Publisher 1 sends a message
         let message1 = Message("Message from Publisher 1".to_string());
-        publisher.publish(&topic, message1.clone());
+        publisher.publish(&topic, message1.clone()).await.unwrap();
 
         // Publisher 2 sends a message
         let message2 = Message("Message from Publisher 2".to_string());
-        publisher.publish(&topic, message2.clone());
+        publisher.publish(&topic, message2.clone()).await.unwrap();
 
         // Subscriber receives the first message
         let received_message1 = receiver.recv().await.unwrap();
@@ -303,7 +301,7 @@ mod tests {
 
         // Publisher sends a message to topic 1
         let message1 = Message("Hello, Topic 1".to_string());
-        publisher.publish(&topic1, message1.clone());
+        publisher.publish(&topic1, message1.clone()).await.unwrap();
 
         // Subscriber 1 receives the message for topic 1
         let received_message1 = receiver1.recv().await.unwrap();
@@ -314,7 +312,7 @@ mod tests {
 
         // Publisher sends a message to topic 2
         let message2 = Message("Hello, Topic 2".to_string());
-        publisher.publish(&topic2, message2.clone());
+        publisher.publish(&topic2, message2.clone()).await.unwrap();
 
         // Subscriber 2 receives the message for topic 2
         let received_message2 = receiver2.recv().await.unwrap();
@@ -338,9 +336,9 @@ mod tests {
         let message2 = Message("Message for Topic 2".to_string());
         let message3 = Message("Message for Topic 3".to_string());
 
-        publisher.publish(&topic1, message1.clone());
-        publisher.publish(&topic2, message2.clone());
-        publisher.publish(&topic3, message3.clone());
+        publisher.publish(&topic1, message1.clone()).await.unwrap();
+        publisher.publish(&topic2, message2.clone()).await.unwrap();
+        publisher.publish(&topic3, message3.clone()).await.unwrap();
 
         // Subscriber should receive the messages in the order they were published
         let received_message1 = receiver.recv().await.unwrap();

@@ -10,7 +10,10 @@ async fn main() {
     let mut receiver1 = topic_stream.subscribe(&[topic.clone()]);
     let mut receiver2 = topic_stream.subscribe(&[topic.clone()]);
 
-    topic_stream.publish(&topic, "Version 1.1 released!".to_string());
+    topic_stream
+        .publish(&topic, "Version 1.1 released!".to_string())
+        .await
+        .unwrap();
 
     if let Some(message) = receiver1.recv().await {
         println!("Receiver 1 got: {}", message);
