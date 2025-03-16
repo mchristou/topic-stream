@@ -1,7 +1,12 @@
 [package]
-name = "topic_stream"
+name = "topic-stream"
+description = "Multi-topic publish-subscribe system in Rust with async support"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+keywords = ["async", "publish-subscribe", "broadcast"]
+repository = "https://github.com/mchristou/topic_stream"
+readme = "README.md"
 
 [dependencies]
 dashmap = "6.1.0"

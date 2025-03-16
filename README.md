@@ -1,4 +1,4 @@
-# topic_stream
+# topic-stream
 
 topic_stream is an asynchronous, topic-based publish-subscribe library for Rust,
 designed to provide an efficient way to broadcast messages to multiple subscribers.
