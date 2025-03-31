@@ -129,6 +129,8 @@ impl<T: Eq + Hash + Clone, M: Clone> MultiTopicReceiver<T, M> {
 
     /// An Option<M> containing the received message, or None if all receivers are closed.
     pub async fn recv(&mut self) -> Option<M> {
+        self.receivers.retain(|r| !r.is_closed());
+
         if self.receivers.is_empty() {
             return None;
         }
