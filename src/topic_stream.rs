@@ -13,8 +13,6 @@ use std::{collections::HashSet, hash::Hash, sync::Arc};
 pub struct TopicStream<T: Eq + Hash + Clone, M: Clone> {
     /// Stores the active subscribers for each topic.
     subscribers: Arc<DashMap<T, Sender<M>>>,
-    /// The maximum capacity for each topic's message channel.
-    capacity: usize,
 }
 
 impl<T: Eq + Hash + Clone, M: Clone> TopicStream<T, M> {
@@ -28,7 +26,6 @@ impl<T: Eq + Hash + Clone, M: Clone> TopicStream<T, M> {
     pub fn new(capacity: usize) -> Self {
         Self {
             subscribers: Arc::new(DashMap::with_capacity(capacity)),
-            capacity,
         }
     }
 
@@ -41,7 +38,7 @@ impl<T: Eq + Hash + Clone, M: Clone> TopicStream<T, M> {
     /// # Returns
     /// A MultiTopicReceiver that listens to the specified topics.
     pub fn subscribe(&self, topics: &[T]) -> MultiTopicReceiver<T, M> {
-        let mut receiver = MultiTopicReceiver::new(Arc::new(self.clone()));
+        let mut receiver = MultiTopicReceiver::new(Arc::clone(&self.subscribers));
         receiver.subscribe(topics);
 
         receiver
@@ -64,22 +61,6 @@ impl<T: Eq + Hash + Clone, M: Clone> TopicStream<T, M> {
 
         Ok(())
     }
-
-    /// Retrieves the existing receiver for a topic or creates a new one if it doesn't exist.
-    ///
-    /// # Arguments
-    /// - `topic`: The topic for which a receiver is required.
-    ///
-    /// # Returns
-    /// A `Receiver<M>` that can be used to receive messages from the topic.
-    fn get_or_create_receiver(&self, topic: &T) -> Receiver<M> {
-        let topic = topic.clone();
-        let (sender, _receiver) = async_broadcast::broadcast(self.capacity);
-        self.subscribers
-            .entry(topic)
-            .or_insert_with(|| sender)
-            .new_receiver()
-    }
 }
 
 /// A multi-topic receiver that listens to messages from multiple topics.
@@ -90,7 +71,7 @@ impl<T: Eq + Hash + Clone, M: Clone> TopicStream<T, M> {
 #[derive(Debug)]
 pub struct MultiTopicReceiver<T: Eq + Hash + Clone, M: Clone> {
     /// A reference to the associated TopicStream.
-    topic_stream: Arc<TopicStream<T, M>>,
+    subscribers: Arc<DashMap<T, Sender<M>>>,
     /// The list of active message receivers for the subscribed topics.
     receivers: Vec<Receiver<M>>,
     /// Tracks the topics this receiver is currently subscribed to.
@@ -101,13 +82,13 @@ impl<T: Eq + Hash + Clone, M: Clone> MultiTopicReceiver<T, M> {
     /// Creates a new MultiTopicReceiver for the given TopicStream.
     ///
     /// # Arguments
-    /// - topic_stream: An Arc reference to the TopicStream.
+    /// - subscribers: A reference to the DashMap containing the active subscribers.
     ///
     /// # Returns
     /// A new MultiTopicReceiver instance.
-    pub fn new(topic_stream: Arc<TopicStream<T, M>>) -> Self {
+    pub fn new(subscribers: Arc<DashMap<T, Sender<M>>>) -> Self {
         Self {
-            topic_stream,
+            subscribers,
             receivers: Vec::new(),
             subscribed_topics: HashSet::new(),
         }
@@ -123,7 +104,16 @@ impl<T: Eq + Hash + Clone, M: Clone> MultiTopicReceiver<T, M> {
             topics
                 .iter()
                 .filter(|topic| self.subscribed_topics.insert((*topic).clone()))
-                .map(|topic| self.topic_stream.get_or_create_receiver(topic)),
+                .map(|topic| {
+                    let topic = topic.clone();
+                    let (sender, _receiver) =
+                        async_broadcast::broadcast(self.subscribers.capacity());
+
+                    self.subscribers
+                        .entry(topic)
+                        .or_insert_with(|| sender)
+                        .new_receiver()
+                }),
         );
     }
 
@@ -152,7 +142,7 @@ impl<T: Eq + Hash + Clone, M: Clone> Drop for MultiTopicReceiver<T, M> {
         let mut to_remove = Vec::new();
 
         for topic in &self.subscribed_topics {
-            if let Some(sender) = self.topic_stream.subscribers.get(topic) {
+            if let Some(sender) = self.subscribers.get(topic) {
                 if sender.receiver_count() <= 1 {
                     to_remove.push(topic.clone());
                 }
@@ -160,7 +150,7 @@ impl<T: Eq + Hash + Clone, M: Clone> Drop for MultiTopicReceiver<T, M> {
         }
 
         to_remove.into_iter().for_each(|topic| {
-            self.topic_stream.subscribers.remove(&topic);
+            self.subscribers.remove(&topic);
         });
     }
 }
