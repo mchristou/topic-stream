@@ -13,19 +13,22 @@ use std::{collections::HashSet, hash::Hash, sync::Arc};
 pub struct TopicStream<T: Eq + Hash + Clone, M: Clone> {
     /// Stores the active subscribers for each topic.
     subscribers: Arc<DashMap<T, Sender<M>>>,
+    /// The maximum number of messages each topic can hold in its buffer.
+    buffer_size: usize,
 }
 
 impl<T: Eq + Hash + Clone, M: Clone> TopicStream<T, M> {
-    /// Creates a new TopicStream instance with the specified capacity.
+    /// Creates a new TopicStream instance with the specified buffer size.
     ///
     /// # Arguments
-    /// - capacity: The maximum number of messages each topic can hold in its buffer.
+    /// - buffer_size: The maximum number of messages each topic can hold in its buffer.
     ///
     /// # Returns
     /// A new TopicStream instance.
-    pub fn new(capacity: usize) -> Self {
+    pub fn new(buffer_size: usize) -> Self {
         Self {
-            subscribers: Arc::new(DashMap::with_capacity(capacity)),
+            subscribers: Arc::new(DashMap::new()),
+            buffer_size,
         }
     }
 
@@ -38,7 +41,7 @@ impl<T: Eq + Hash + Clone, M: Clone> TopicStream<T, M> {
     /// # Returns
     /// A MultiTopicReceiver that listens to the specified topics.
     pub fn subscribe(&self, topics: &[T]) -> MultiTopicReceiver<T, M> {
-        let mut receiver = MultiTopicReceiver::new(Arc::clone(&self.subscribers));
+        let mut receiver = MultiTopicReceiver::new(Arc::clone(&self.subscribers), self.buffer_size);
         receiver.subscribe(topics);
 
         receiver
@@ -76,6 +79,8 @@ pub struct MultiTopicReceiver<T: Eq + Hash + Clone, M: Clone> {
     receivers: Vec<Receiver<M>>,
     /// Tracks the topics this receiver is currently subscribed to.
     subscribed_topics: HashSet<T>,
+    /// The message buffer for each topic's broadcast channel.
+    buffer_size: usize,
 }
 
 impl<T: Eq + Hash + Clone, M: Clone> MultiTopicReceiver<T, M> {
@@ -83,14 +88,16 @@ impl<T: Eq + Hash + Clone, M: Clone> MultiTopicReceiver<T, M> {
     ///
     /// # Arguments
     /// - subscribers: A reference to the DashMap containing the active subscribers.
+    /// - buffer_size: The size of the message buffer for each topic's broadcast channel.
     ///
     /// # Returns
     /// A new MultiTopicReceiver instance.
-    pub fn new(subscribers: Arc<DashMap<T, Sender<M>>>) -> Self {
+    pub fn new(subscribers: Arc<DashMap<T, Sender<M>>>, buffer_size: usize) -> Self {
         Self {
             subscribers,
             receivers: Vec::new(),
             subscribed_topics: HashSet::new(),
+            buffer_size,
         }
     }
 
@@ -106,8 +113,7 @@ impl<T: Eq + Hash + Clone, M: Clone> MultiTopicReceiver<T, M> {
                 .filter(|topic| self.subscribed_topics.insert((*topic).clone()))
                 .map(|topic| {
                     let topic = topic.clone();
-                    let (sender, _receiver) =
-                        async_broadcast::broadcast(self.subscribers.capacity());
+                    let (sender, _receiver) = async_broadcast::broadcast(self.buffer_size);
 
                     self.subscribers
                         .entry(topic)
